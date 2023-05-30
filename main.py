@@ -1,29 +1,36 @@
 # Import required modules
-from distutils.command.upload import upload
 import logging
-import httplib2
-import sys
-import random
-import time
 import os
-
-from tqdm import tqdm
+import random
+import sys
+import time
+import multiprocessing
+from json import loads
 from pathlib import Path
+from subprocess import CalledProcessError, run
+
+import httplib2
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from oauth2client.client import flow_from_clientsecrets
+from oauth2client.clientsecrets import InvalidClientSecretsError
 from oauth2client.file import Storage
 from oauth2client.tools import run_flow
-
+from tqdm import tqdm
 
 logging.basicConfig(
-    format='%(asctime)s %(levelname)s %(message)s',
+    format='%(asctime)s %(name)s %(levelname)s %(message)s',
     datefmt='%d-%b-%y %H:%M:%S',
-    filename='convert & uploader.log',
-    filemode='a',
+    filename='clip converter and uploader.log',
+    filemode='w',
     level=logging.DEBUG
 )
+
+logger = logging.getLogger('main.py')
+
+subfolder_upload_whitelist = ['Grand Theft Auto V']
+whitelisted_extensions = ['.mkv', '.mp4']
 
 output_folder = 'AV1'
 
@@ -43,24 +50,37 @@ YOUTUBE_API_SERVICE_NAME = "youtube"
 YOUTUBE_API_VERSION = "v3"
 
 def get_authenticated_service():
-    flow = flow_from_clientsecrets(CLIENT_SECRETS_FILE,
-        scope=YOUTUBE_SCOPES)
+    try:
+        flow = flow_from_clientsecrets(CLIENT_SECRETS_FILE,
+            scope=YOUTUBE_SCOPES)
 
-    storage = Storage("%s-oauth2.json" % sys.argv[0])
-    credentials = storage.get()
+        storage = Storage("%s-oauth2.json" % sys.argv[0])
+        credentials = storage.get()
 
-    if credentials is None or credentials.invalid:
-        credentials = run_flow(flow, storage)
+        if credentials is None or credentials.invalid:
+            log_info('No valid credentials found. Attempting to authenticate with the YouTube API')
+            credentials = run_flow(flow, storage)
 
-    return build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, http=credentials.authorize(httplib2.Http()))
+        return build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, http=credentials.authorize(httplib2.Http()))
+    
+    except InvalidClientSecretsError as e:
+        print('"client_oath.json" could not be found or had errors')
+        log_exception(e)
+        exit()
+    
+    except Exception as e:
+        print('Unknown error. Check logs for details')
+        log_exception(e)
+        exit()
 
 # Function for uploading the video.
 # This should be multithreaded with the converter
-def upload_video(file: str, youtube):
+def upload_video(file: str, youtube, upload_event):
+    log_info('Creating body for uploading')
     body=dict(
         snippet=dict(
             title=Path(file).stem,
-            description='Icon & outro by @stardust-buckethead8594',
+            description='Icon & outro by @Stardust_Buckethead',
             categoryId='20'
         ),
         status=dict(
@@ -68,15 +88,16 @@ def upload_video(file: str, youtube):
         )
     )
 
+    log_info('Creating insert request')
     insert_request = youtube.videos().insert(
         part=','.join(body.keys()),
         body=body,
         media_body=MediaFileUpload(file, chunksize=1024 * 1024, resumable=True)
     )
 
-    resumable_upload(insert_request)
+    resumable_upload(file, insert_request, upload_event)
 
-def resumable_upload(insert_request):
+def resumable_upload(filename, insert_request, upload_event):
     response = None
     error = None
     retry = 0
@@ -91,6 +112,8 @@ def resumable_upload(insert_request):
 
             if response is not None:
                 progress_bar.close()
+                log_info('Unsetting upload_event event')
+                upload_event.clear()
                 if 'id' in response:
                     print("Video id '%s' was successfully uploaded." % response['id'])
                 else:
@@ -110,6 +133,8 @@ def resumable_upload(insert_request):
             print(error)
             retry += 1
             if retry > MAX_RETRIES:
+                log_info('Unsetting upload_event event')
+                upload_event.clear()
                 exit("No longer attempting to retry.")
 
             max_sleep = 2 ** retry
@@ -117,9 +142,9 @@ def resumable_upload(insert_request):
             print(f"Sleeping {sleep_seconds} seconds and then retrying...")
             time.sleep(sleep_seconds)
 
-filename = r"C:\Users\nichel\Downloads\Recordings\GTA5\lossless\GTA5 Raphy_952 the modder 2023-02-06 00-54-28.mp4"
+        log_info('Unsetting upload_event event')
+        upload_event.clear()
 
-upload_video(filename)
 
 # Function for searching own channel for the video
 def video_exists_on_channel(filename: str, youtube) -> bool:
@@ -139,30 +164,31 @@ def video_exists_on_channel(filename: str, youtube) -> bool:
 # Function for converting clip to AV1
 # This should be multithreaded with the uploader
 def convert_to_av1(youtube):
-    for root, dirs, files in os.walk(r'E:\Recordings'):
+    for root, dirs, files in os.walk(r'C:\Users\nichel\Downloads\Recordings'):
         for dirname in dirs:
             # If the folder is the "lossless" folder where I keep my edited clips
             if dirname == 'lossless':
                 
                 # Log "lossless" folder location
-                log_info(f'Found {os.path.join(root, dirname)}!')
+                log_info(f'Found {Path(root, dirname)}!')
 
                 # Get list of files and iterate over them.
                 # If folder is empty, an empty list will be returned, and thus not run
-                for filename in os.listdir(os.path.join(root, dirname)):
+                for filename in os.listdir(Path(root, dirname)):
+                    
+                    # I exlusively work with the mp4 and mkv containers.
+                    # If the file does not have either, assume it should be ignored
+                    if Path(filename).suffix.casefold() not in whitelisted_extensions:
+                        log_info(f'Skipping {filename} with reason: Not in an mp4 or mkv container')
+                        continue
                     
                     # Use the root folder variable to create a variable
                     # containing the path for the converted folder
                     # and a variable containing the path as well as filename
                     # for the new converted file
-                    dirname_converted = os.path.join(root, output_folder)
-                    filename_converted = os.path.join(root, output_folder, f"{os.path.splitext(filename)[0]}.mp4")
-
-                    # I exlusively work with the mp4 and mkv containers.
-                    # If the file does not have either, assume it should be ignored
-                    if os.path.splitext(filename)[1].casefold() == ('.mkv' or '.mp4'):
-                        log_info(f'Skipping {filename_converted}. Reason: Not an mp4 or mkv container')
-                        continue
+                    dirname_converted = Path(root, output_folder)
+                    full_file_path_converted = Path(root, output_folder, f"{os.path.splitext(filename)[0]}.mp4")
+                    full_file_path = Path(root, dirname, filename)
 
                     # Check if the folder for converted clips does not exist
                     # and create it, as well as log it, if it does not
@@ -174,44 +200,115 @@ def convert_to_av1(youtube):
                         except OSError as e:
                             log_exception(e)
                             continue
+                    
+                    upload_event = multiprocessing.Event()
+
+                    if any(_ in root for _ in subfolder_upload_whitelist):
+                        log_info('Video is in whitelisted subfolder. Checking if video has been uploaded...')
+                        
+                        if video_exists_on_channel(filename, youtube):
+                            log_info(f'{filename} has aleady been uploaded')
+                        
+                        else:
+                            log_info('No matching title found on channel. Uploading...')
+                            log_info('Enabling upload_event event')
+                            upload_event.set()
+                            # MULTITHREADING SEEMS TO BREAK THE Google API's LIBRARY'S ABILITY TO AUTHORIZE
+                            # THIS IS GONNA BE A HEADACHE...
+                            #upload_video(full_file_path, youtube, upload_event)
+                            #multiprocessing.Process(target=upload_video, args=(full_file_path, youtube, upload_event)).start()
+
 
                     # Check if a file with the same name already exists
                     # in the converted folder.
-                    # If it is 1,048,576 bytes (1 megabyte) or less
+                    # If their frame counts do not match
                     # delete, log and convert it.
                     # Otherwise, assume it has aleady been converted and log it
-                    if os.path.exists(filename_converted):
-                        if os.stat(filename_converted).st_size <= 1_048_576:
-                            os.remove(filename_converted)
-                            log_info(f'Removed {filename_converted} due to being 1 megabyte or less in size')
+                    if os.path.exists(full_file_path_converted):
+                        if get_video_length(full_file_path) != get_video_length(full_file_path_converted):
+                            os.remove(full_file_path_converted)
+                            log_info(f'Removed converted {filename} with reason: Framecount mismatch')
                         
                         else:
-                            log_info(f'Skipping {filename_converted}. Reason: Already exists')
+                            log_info(f'Skipping {filename} with reason: Already exists')
                             continue
-
-                    log_info('Checking if video has been uploaded...')
                     
-                    if video_exists_on_channel(filename, youtube):
-                        log_info('Video has aleady been uploaded')
-                    
-                    else:
-                        log_info('No matching title found on channel')
-                        
 
+                    # Let the user know which file is about to be converted, and log it
+                    print(f'\nConverting {filename}\n')
+                    log_info(f'Converting {filename}.')
+                    
+                    # Create a list with ffmpeg and it's paramters, for a high-quality medium-slow AV1 encoding
+                    # a CRF of 45 may seem too high, but it's the perfect mix between
+                    # low filesize and good-enough quality for online sharing.
+                    cmd = ['ffmpeg', '-n', '-i', str(full_file_path), '-c:v',
+                        'libsvtav1', '-preset', '4', '-crf', '45', '-b:v', '0', '-c:a', 'aac', '-b:a',
+                        '192k', '-movflags', '+faststart',
+                        str(full_file_path_converted)]
+
+                    # Attempt to run command, and assume any non-zero codes are bad
+                    # This isn't the best, but in our case it should be more than fine
+                    # If exit-code is non-zero, log the exception and continue with the next file
+                    try:
+                        run(cmd, check=True)
+                    except CalledProcessError as e:
+                        log_exception('Process error occured')
+                        exit()
+                    except FileNotFoundError as e:
+                        log_exception('Failed to find ffmpeg executable')
+                        print('No ffmpeg exectuable was found.')
+                        exit()
+                    except KeyboardInterrupt:
+                        print('Keyboard interrupt received. Quitting...')
+                        os.remove(full_file_path_converted)
+                        log_info(f'Removed converted {filename} with reason: Keyboard interrupt')
+                        exit()
+
+                    while upload_event.is_set():
+                        time.sleep(1)
+
+            # Log folders ignored by the script
+            else:
+                log_info(f'Ignoring folder {Path(root, dirname)}.')
+
+# Function for getting the length of the original and converted video, in frames
+def get_video_length(filename: str) -> int:
+    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+           '-show_entries', 'stream=nb_frames', '-of', 'json', str(filename)]
+
+    try:
+        p = run(cmd, check=True, capture_output=True)
+    except CalledProcessError as e:
+        log_exception(e)
+        print('Error getting video durations. Check logs for details')
+        if 'Invalid data found when processing input' in e.stderr.decode():
+            os.remove(filename)
+            log_info(f'Removed converted {filename} with reason: Corruption or unfinished encoding')
+        exit()
+    except FileNotFoundError as e:
+        log_exception('Failed to find ffprobe executable')
+        print('No ffprobe exectuable was found.')
+        exit()
+
+    try:
+        frames = int(loads(p.stdout)['streams'][0]['nb_frames'])
+        return frames
+    except KeyError as e:
+        log_exception(e)
+        print('Could not find any frames metadata in the video')
+        exit()
 
 
 # Logging functions
 def log_info(message: str):
-    logging.info(message)
+    logger.info(message)
 
 def log_exception(e: Exception):
-    logging.exception('Exception occurred')
+    logger.exception('Exception occurred')
 
 
 if __name__ == '__main__':
-    log_info('#################'
-             '\n\t\t\t#Starting script#'
-             '\n\t\t\t#################')
+    log_info('#Starting script#')
 
     youtube = get_authenticated_service()
     
