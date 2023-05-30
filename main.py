@@ -7,7 +7,7 @@ import time
 import multiprocessing
 from json import loads
 from pathlib import Path
-from subprocess import CalledProcessError, run
+from subprocess import CalledProcessError, run, CREATE_NEW_CONSOLE
 
 import httplib2
 from googleapiclient.discovery import build
@@ -75,7 +75,7 @@ def get_authenticated_service():
 
 # Function for uploading the video.
 # This should be multithreaded with the converter
-def upload_video(file: str, youtube, upload_event):
+def upload_video(file: str):
     log_info('Creating body for uploading')
     body=dict(
         snippet=dict(
@@ -95,9 +95,9 @@ def upload_video(file: str, youtube, upload_event):
         media_body=MediaFileUpload(file, chunksize=1024 * 1024, resumable=True)
     )
 
-    resumable_upload(file, insert_request, upload_event)
+    resumable_upload(file, insert_request)
 
-def resumable_upload(filename, insert_request, upload_event):
+def resumable_upload(filename, insert_request):
     response = None
     error = None
     retry = 0
@@ -112,29 +112,25 @@ def resumable_upload(filename, insert_request, upload_event):
 
             if response is not None:
                 progress_bar.close()
-                log_info('Unsetting upload_event event')
-                upload_event.clear()
                 if 'id' in response:
                     print("Video id '%s' was successfully uploaded." % response['id'])
                 else:
                     exit("The upload failed with an unexpected response: %s" % response)
         except HttpError as e:
-            progress_bar.close()
             if e.resp.status in RETRIABLE_STATUS_CODES:
                 error = "A retriable HTTP error %d occurred:\n%s" % (e.resp.status,
                                                                     e.content)
             else:
+                progress_bar.close()
                 raise
         except RETRIABLE_EXCEPTIONS as e:
-            progress_bar.close()
             error = f"A retriable error occurred: {e}"
 
         if error is not None:
             print(error)
             retry += 1
             if retry > MAX_RETRIES:
-                log_info('Unsetting upload_event event')
-                upload_event.clear()
+                progress_bar.close()
                 exit("No longer attempting to retry.")
 
             max_sleep = 2 ** retry
@@ -142,12 +138,9 @@ def resumable_upload(filename, insert_request, upload_event):
             print(f"Sleeping {sleep_seconds} seconds and then retrying...")
             time.sleep(sleep_seconds)
 
-        log_info('Unsetting upload_event event')
-        upload_event.clear()
-
 
 # Function for searching own channel for the video
-def video_exists_on_channel(filename: str, youtube) -> bool:
+def video_exists_on_channel(filename: str) -> bool:
     response = youtube.search().list(
         part='snippet',
         forMine=True,
@@ -163,8 +156,8 @@ def video_exists_on_channel(filename: str, youtube) -> bool:
 
 # Function for converting clip to AV1
 # This should be multithreaded with the uploader
-def convert_to_av1(youtube):
-    for root, dirs, files in os.walk(r'C:\Users\nichel\Downloads\Recordings'):
+def convert_to_av1():
+    for root, dirs, files in os.walk(r'E:\Recordings'):
         for dirname in dirs:
             # If the folder is the "lossless" folder where I keep my edited clips
             if dirname == 'lossless':
@@ -201,22 +194,22 @@ def convert_to_av1(youtube):
                             log_exception(e)
                             continue
                     
-                    upload_event = multiprocessing.Event()
+                    p = multiprocessing.Process(target=upload_video, args=(full_file_path))
 
                     if any(_ in root for _ in subfolder_upload_whitelist):
                         log_info('Video is in whitelisted subfolder. Checking if video has been uploaded...')
                         
-                        if video_exists_on_channel(filename, youtube):
+                        if video_exists_on_channel(filename):
                             log_info(f'{filename} has aleady been uploaded')
                         
                         else:
                             log_info('No matching title found on channel. Uploading...')
-                            log_info('Enabling upload_event event')
-                            upload_event.set()
                             # MULTITHREADING SEEMS TO BREAK THE Google API's LIBRARY'S ABILITY TO AUTHORIZE
                             # THIS IS GONNA BE A HEADACHE...
-                            #upload_video(full_file_path, youtube, upload_event)
-                            #multiprocessing.Process(target=upload_video, args=(full_file_path, youtube, upload_event)).start()
+                            # SHOULD BE FIXED NOW? i JUST NEED TO TEST IT MORE
+                            #upload_video(full_file_path, upload_event)
+                            p.start()
+                            
 
 
                     # Check if a file with the same name already exists
@@ -250,7 +243,7 @@ def convert_to_av1(youtube):
                     # This isn't the best, but in our case it should be more than fine
                     # If exit-code is non-zero, log the exception and continue with the next file
                     try:
-                        run(cmd, check=True)
+                        run(cmd, check=True, creationflags=CREATE_NEW_CONSOLE)
                     except CalledProcessError as e:
                         log_exception('Process error occured')
                         exit()
@@ -264,8 +257,7 @@ def convert_to_av1(youtube):
                         log_info(f'Removed converted {filename} with reason: Keyboard interrupt')
                         exit()
 
-                    while upload_event.is_set():
-                        time.sleep(1)
+                    p.join()
 
             # Log folders ignored by the script
             else:
@@ -306,10 +298,10 @@ def log_info(message: str):
 def log_exception(e: Exception):
     logger.exception('Exception occurred')
 
+youtube = get_authenticated_service()
 
 if __name__ == '__main__':
     log_info('#Starting script#')
 
-    youtube = get_authenticated_service()
     
-    convert_to_av1(youtube)
+    convert_to_av1()
