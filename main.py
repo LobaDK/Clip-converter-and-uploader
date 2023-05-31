@@ -220,7 +220,7 @@ def convert_to_av1():
                             log_exception(e)
                             continue
                     
-                    p = multiprocessing.Process(target=upload_video, args=(full_file_path))
+                    p = multiprocessing.Process(target=upload_video, args=(full_file_path,))
 
                     if any(_ in root for _ in subfolder_upload_whitelist):
                         log_info('Video is in whitelisted subfolder. Checking if video has been uploaded...')
