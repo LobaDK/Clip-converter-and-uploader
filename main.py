@@ -27,47 +27,73 @@ logging.basicConfig(
     level=logging.DEBUG
 )
 
+# Set the name of the program the logs will appear under
+# This will make it easier to see which script the log appeared from
 logger = logging.getLogger('main.py')
 
+# Videos in these folders will be checked on the channel and uploaded if missing
 subfolder_upload_whitelist = ['Grand Theft Auto V']
+
+# List of extensions/containers from which the script will convert to AV1 MP4
 whitelisted_extensions = ['.mkv', '.mp4']
 
+# Folder the converted files will be stored in, relative to the folder they came from
 output_folder = 'AV1'
 
+# Tell httplib that we're applying retry logic ourselves
 httplib2.RETRIES = 1
 
+# Upload retry attempts before quitting
 MAX_RETRIES = 10
 
+# Exceptions that still allow us to retry
 RETRIABLE_EXCEPTIONS = (httplib2.HttpLib2Error, IOError)
 
+# Status codes that still allow us to retry
 RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
 
+# Name of the oauth file containing the oauth data for the project
 CLIENT_SECRETS_FILE = 'client_oauth.json'
 
+# Scopes we'll be using in the API
 YOUTUBE_SCOPES = ['https://www.googleapis.com/auth/youtube.readonly',
                     'https://www.googleapis.com/auth/youtube.upload']
+
+# Name of the service we're using
 YOUTUBE_API_SERVICE_NAME = "youtube"
+
+# Version of the service we're using
 YOUTUBE_API_VERSION = "v3"
 
+# Returns an object that can be used to interact with the API
 def get_authenticated_service():
     try:
+        # Create a flow object from the oauth file and scopes
         flow = flow_from_clientsecrets(CLIENT_SECRETS_FILE,
             scope=YOUTUBE_SCOPES)
 
+        # Create a storage object from a previously saved oauth token
+        # and get the credentials. If it doesn't exist, credentials will be None
         storage = Storage("%s-oauth2.json" % sys.argv[0])
         credentials = storage.get()
 
+        # If the credentials didn't already exist or are incorrect
+        # get new credentials and save the token to disk
         if credentials is None or credentials.invalid:
             log_info('No valid credentials found. Attempting to authenticate with the YouTube API')
             credentials = run_flow(flow, storage)
 
+        # Build and return the object used to interact with the YouTube API
         return build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, http=credentials.authorize(httplib2.Http()))
     
+    # If the oauth file does not exist or is incorrectly formatted/corrupted
+    # and log it
     except InvalidClientSecretsError as e:
         print('"client_oath.json" could not be found or had errors')
         log_exception(e)
         exit()
     
+    # Catch any other error and log it as well
     except Exception as e:
         print('Unknown error. Check logs for details')
         log_exception(e)
