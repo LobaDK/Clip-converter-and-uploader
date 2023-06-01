@@ -321,6 +321,9 @@ def get_video_length(filename: str) -> int:
 def log_info(message: str):
     logger.info(message)
 
+def log_warning(message: str):
+    logger.warning(message)
+
 def log_exception(e: Exception):
     logger.exception('Exception occurred')
 
@@ -329,5 +332,13 @@ youtube = get_authenticated_service()
 if __name__ == '__main__':
     log_info('#Starting script#')
 
-    
+    # Later versions do not seem to play nice with the Google API modules
+    # resulting in uploads failing with an error resembling
+    # "Redirected but the response is missing a Location: header"
+    # if a chunksize is specified in MediaFileUpload.
+    # External sources say 0.15.0 and down work, but as I haven't tested this
+    # we will assume only 0.15.0 works, but still allow the script to run
+    if httplib2.__version__ != '0.15.0':
+        log_warning(f'httplib2 version 0.15.0 is specifically required, but {httplib2.__version__} is installed')
+
     convert_to_av1()
