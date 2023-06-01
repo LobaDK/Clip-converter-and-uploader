@@ -80,7 +80,7 @@ def get_authenticated_service():
         # If the credentials didn't already exist or are incorrect
         # get new credentials and save the token to disk
         if credentials is None or credentials.invalid:
-            log_info('No valid credentials found. Attempting to authenticate with the YouTube API')
+            log_info('No valid credentials found. Running local webserver to authenticate with user')
             credentials = run_flow(flow, storage)
 
         # Build and return the object used to interact with the YouTube API
@@ -127,19 +127,32 @@ def resumable_upload(filename, insert_request):
     response = None
     error = None
     retry = 0
+
+    # Get the size of the file in bytes, and use it as the "goal" in tqdm
     file_size = os.path.getsize(filename)
     progress_bar = tqdm(total=file_size, unit='bytes', unit_scale=True, desc='Uploading')
+    log_info(f'Uploading {Path(filename).stem}')
+    
+    # response should only be assigned a value when the upload is complete
     while response is None:
         try:
             status, response = insert_request.next_chunk()
             if status:
+
+                # I've spent several hours trying to figure out what .progress() does and returns
+                # since Google's documentation has no mention of it anywhere.
+                # it returns a float value acting as the percentage of bytes it has uploaded
+                # e.g. file with size of 11225372 bytes: 0.25 * 11225372 = 2806343 bytes has been uploaded.
+                # We then subtract that with the current progress to add only the new progress
+                # as otherwise we'd essentially do 25% + 26% when it only uploaded 1% more.
+                # Apparently resumable_progress returns the uploaded bytes, so will test with that too.
                 progress = int(status.progress() * file_size)
                 progress_bar.update(progress - progress_bar.n)
 
             if response is not None:
                 progress_bar.close()
                 if 'id' in response:
-                    print("Video id '%s' was successfully uploaded." % response['id'])
+                    print(f"Successfully uploaded {Path(filename).stem}\nWith ID {response['id']}\nAt https://studio.youtube.com/video/{response['id']}/edit")
                 else:
                     exit("The upload failed with an unexpected response: %s" % response)
         except HttpError as e:
