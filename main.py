@@ -133,28 +133,31 @@ def resumable_upload(filename, insert_request):
     progress_bar = tqdm(total=file_size, unit='bytes', unit_scale=True, desc='Uploading')
     log_info(f'Uploading {Path(filename).stem}')
     
-    # response should only be assigned a value when the upload is complete
+    # response will be None until upload is complete
     while response is None:
         try:
             status, response = insert_request.next_chunk()
             if status:
 
-                # I've spent several hours trying to figure out what .progress() does and returns
-                # since Google's documentation has no mention of it anywhere.
-                # it returns a float value acting as the percentage of bytes it has uploaded
-                # e.g. file with size of 11225372 bytes: 0.25 * 11225372 = 2806343 bytes has been uploaded.
-                # We then subtract that with the current progress to add only the new progress
-                # as otherwise we'd essentially do 25% + 26% when it only uploaded 1% more.
-                # Apparently resumable_progress returns the uploaded bytes, so will test with that too.
-                progress = int(status.progress() * file_size)
-                progress_bar.update(progress - progress_bar.n)
+                # status.resumable_progress returns the total uploaded bytes so far.
+                # By subtracting it from the current progress bar's progress, we add only
+                # the newly uploaded chunk.
+                progress_bar.update(status.resumable_progress - progress_bar.n)
 
             if response is not None:
+
+                # When upload is complete, no status is returned, so the last
+                # bit of progress gets handled here, where we instead use
+                # the filesize of the file, to add the remaining progress
+                progress_bar.update(file_size - progress_bar.n)
+                
                 progress_bar.close()
+                
                 if 'id' in response:
                     print(f"Successfully uploaded {Path(filename).stem}\nWith ID {response['id']}\nAt https://studio.youtube.com/video/{response['id']}/edit")
                 else:
                     exit("The upload failed with an unexpected response: %s" % response)
+        
         except HttpError as e:
             if e.resp.status in RETRIABLE_STATUS_CODES:
                 error = "A retriable HTTP error %d occurred:\n%s" % (e.resp.status,
@@ -194,9 +197,8 @@ def video_exists_on_channel(filename: str) -> bool:
 
 
 # Function for converting clip to AV1
-# This should be multithreaded with the uploader
 def convert_to_av1():
-    for root, dirs, files in os.walk(r'E:\Recordings'):
+    for root, dirs, files in os.walk(r'C:\Users\nichel\Downloads\Recordings'):
         for dirname in dirs:
             # If the folder is the "lossless" folder where I keep my edited clips
             if dirname == 'lossless':
@@ -243,10 +245,6 @@ def convert_to_av1():
                         
                         else:
                             log_info('No matching title found on channel. Uploading...')
-                            # MULTITHREADING SEEMS TO BREAK THE Google API's LIBRARY'S ABILITY TO AUTHORIZE
-                            # THIS IS GONNA BE A HEADACHE...
-                            # SHOULD BE FIXED NOW? i JUST NEED TO TEST IT MORE
-                            #upload_video(full_file_path, upload_event)
                             p.start()
                             
 
@@ -283,13 +281,16 @@ def convert_to_av1():
                     # If exit-code is non-zero, log the exception and continue with the next file
                     try:
                         run(cmd, check=True, creationflags=CREATE_NEW_CONSOLE)
+                    
                     except CalledProcessError as e:
                         log_exception('Process error occured')
                         exit()
+                    
                     except FileNotFoundError as e:
                         log_exception('Failed to find ffmpeg executable')
                         print('No ffmpeg exectuable was found.')
                         exit()
+                    
                     except KeyboardInterrupt:
                         print('Keyboard interrupt received. Quitting...')
                         os.remove(full_file_path_converted)
@@ -309,6 +310,7 @@ def get_video_length(filename: str) -> int:
 
     try:
         p = run(cmd, check=True, capture_output=True)
+    
     except CalledProcessError as e:
         log_exception(e)
         print('Error getting video durations. Check logs for details')
@@ -316,6 +318,7 @@ def get_video_length(filename: str) -> int:
             os.remove(filename)
             log_info(f'Removed converted {filename} with reason: Corruption or unfinished encoding')
         exit()
+    
     except FileNotFoundError as e:
         log_exception('Failed to find ffprobe executable')
         print('No ffprobe exectuable was found.')
@@ -324,6 +327,7 @@ def get_video_length(filename: str) -> int:
     try:
         frames = int(loads(p.stdout)['streams'][0]['nb_frames'])
         return frames
+    
     except KeyError as e:
         log_exception(e)
         print('Could not find any frames metadata in the video')
