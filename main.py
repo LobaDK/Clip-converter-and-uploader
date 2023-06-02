@@ -7,7 +7,7 @@ import time
 import multiprocessing
 from json import loads
 from pathlib import Path
-from subprocess import CalledProcessError, run, CREATE_NEW_CONSOLE
+from subprocess import CalledProcessError, run, Popen, PIPE, STDOUT
 
 import httplib2
 from googleapiclient.discovery import build
@@ -23,7 +23,7 @@ logging.basicConfig(
     format='%(asctime)s %(name)s %(levelname)s %(message)s',
     datefmt='%d-%b-%y %H:%M:%S',
     filename='clip converter and uploader.log',
-    filemode='w',
+    filemode='a',
     level=logging.DEBUG
 )
 
@@ -130,7 +130,7 @@ def resumable_upload(filename, insert_request):
 
     # Get the size of the file in bytes, and use it as the "goal" in tqdm
     file_size = os.path.getsize(filename)
-    progress_bar = tqdm(total=file_size, unit='bytes', unit_scale=True, desc='Uploading')
+    progress_bar = tqdm(total=file_size, unit='bytes', unit_scale=True, desc='Uploading', position=0)
     log_info(f'Uploading {Path(filename).stem}')
     
     # response will be None until upload is complete
@@ -264,34 +264,70 @@ def convert_to_av1():
                             continue
                     
 
-                    # Let the user know which file is about to be converted, and log it
-                    print(f'\nConverting {filename}\n')
+                    # Log the file we're about to convert
                     log_info(f'Converting {filename}.')
                     
                     # Create a list with ffmpeg and it's paramters, for a high-quality medium-slow AV1 encoding
                     # a CRF of 45 may seem too high, but it's the perfect mix between
                     # low filesize and good-enough quality for online sharing.
-                    cmd = ['ffmpeg', '-n', '-i', str(full_file_path), '-c:v',
-                        'libsvtav1', '-preset', '4', '-crf', '45', '-b:v', '0', '-c:a', 'aac', '-b:a',
-                        '192k', '-movflags', '+faststart',
-                        str(full_file_path_converted)]
+                    cmd = ['ffmpeg', '-v', 'fatal', '-n', '-i', str(full_file_path),
+                        '-progress', '-', '-c:v', 'libsvtav1', '-preset', '4',
+                        '-crf', '45', '-b:v', '0', '-c:a', 'aac', '-b:a', '192k',
+                        '-movflags', '+faststart', str(full_file_path_converted)]
+
+                    frames = get_video_length(full_file_path)
+
+                    ffmpeg_progress_bar = tqdm(total=frames, unit='frames', desc=f'Converting {Path(filename).stem}', position=2)
 
                     # Attempt to run command, and assume any non-zero codes are bad
                     # This isn't the best, but in our case it should be more than fine
                     # If exit-code is non-zero, log the exception and continue with the next file
                     try:
-                        run(cmd, check=True, creationflags=CREATE_NEW_CONSOLE)
+                        p = Popen(cmd, stdout=PIPE, stderr=STDOUT)
+
+                        # Run an infinite loop
+                        while True:
+                            # Decode the output to pure text
+                            stdout = p.stdout.readline().decode()
+                            
+                            # Get rid of newlines. It's not actually required
+                            # but it bothers me knowing each 2nd line is basically empty
+                            # without it
+                            stdout = stdout.replace('\n', '')
+                            
+                            # if the current string in our output is the frames progress
+                            if 'frame=' in stdout:
+
+                                    # Add only the new frames by subtracting the total converted with the total progress
+                                    ffmpeg_progress_bar.update(int(stdout.split('=')[1]) - ffmpeg_progress_bar.n)
+                            
+                            # If the current string in our output instead is the returned progress type.
+                            # ffmpeg uses this to display if it's done or not, by being either "continue"
+                            # or "end"
+                            if 'progress=' in stdout:
+
+                                    # if the progress is end, it means it's done converting, and we can break out of the loop
+                                    if stdout.split('=')[1] == 'end': break
+
+                            # If the process exited due to the file already existing
+                            if 'already exists' in stdout:
+                                    break
+
+                        ffmpeg_progress_bar.close()
                     
                     except CalledProcessError as e:
+                        ffmpeg_progress_bar.close()
                         log_exception('Process error occured')
                         exit()
                     
                     except FileNotFoundError as e:
+                        ffmpeg_progress_bar.close()
                         log_exception('Failed to find ffmpeg executable')
                         print('No ffmpeg exectuable was found.')
                         exit()
                     
                     except KeyboardInterrupt:
+                        ffmpeg_progress_bar.close()
                         print('Keyboard interrupt received. Quitting...')
                         os.remove(full_file_path_converted)
                         log_info(f'Removed converted {filename} with reason: Keyboard interrupt')
