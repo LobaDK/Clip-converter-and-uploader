@@ -9,6 +9,7 @@ from json import loads
 from pathlib import Path
 from subprocess import CalledProcessError, run, Popen, PIPE, STDOUT
 
+import re
 import httplib2
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -30,9 +31,6 @@ logging.basicConfig(
 # Set the name of the program the logs will appear under
 # This will make it easier to see which script the log appeared from
 logger = logging.getLogger('main.py')
-
-# Videos in these folders will be checked on the channel and uploaded if missing
-subfolder_upload_whitelist = ['Grand Theft Auto V']
 
 # List of extensions/containers from which the script will convert to AV1 MP4
 whitelisted_extensions = ['.mkv', '.mp4']
@@ -103,9 +101,12 @@ def get_authenticated_service():
 # This should be multithreaded with the converter
 def upload_video(file: str):
     log_info('Creating body for uploading')
+
+    filename = str(file).replace(' ytupload', '')
+
     body=dict(
         snippet=dict(
-            title=Path(file).stem,
+            title=Path(filename).stem,
             description='Icon & outro by @Stardust_Buckethead',
             categoryId='20'
         ),
@@ -183,6 +184,9 @@ def resumable_upload(filename, insert_request):
 
 # Function for searching own channel for the video
 def video_exists_on_channel(filename: str) -> bool:
+
+    filename = str(filename).replace(' ytupload', '')
+
     response = youtube.search().list(
         part='snippet',
         forMine=True,
@@ -198,7 +202,7 @@ def video_exists_on_channel(filename: str) -> bool:
 
 # Function for converting clip to AV1
 def convert_to_av1():
-    for root, dirs, files in os.walk(r'C:\Users\nichel\Downloads\Recordings'):
+    for root, dirs, files in os.walk(r'E:\Recordings'):
         for dirname in dirs:
             # If the folder is the "lossless" folder where I keep my edited clips
             if dirname == 'lossless':
@@ -237,8 +241,11 @@ def convert_to_av1():
                     
                     p = multiprocessing.Process(target=upload_video, args=(full_file_path,))
 
-                    if any(_ in root for _ in subfolder_upload_whitelist):
-                        log_info('Video is in whitelisted subfolder. Checking if video has been uploaded...')
+                    # the phrase "ytupload" in the filename will be used
+                    # to tell the script it should upload the video.
+                    # If it is not in the filename, then it should not be uploaded
+                    if 'ytupload' in filename.casefold():
+                        log_info('Video is marked for upload. Checking if video has been uploaded...')
                         
                         if video_exists_on_channel(filename):
                             log_info(f'{filename} has aleady been uploaded')
@@ -277,11 +284,13 @@ def convert_to_av1():
 
                     frames = get_video_length(full_file_path)
 
-                    ffmpeg_progress_bar = tqdm(total=frames, unit='frames', desc=f'Converting {Path(filename).stem}', position=2)
+                    ffmpeg_progress_bar = tqdm(total=frames, unit='frames', desc='Converting', position=2)
 
-                    # Attempt to run command, and assume any non-zero codes are bad
-                    # This isn't the best, but in our case it should be more than fine
-                    # If exit-code is non-zero, log the exception and continue with the next file
+                    # Run process and args from above in a non-blocking way
+                    # and pipe the stdout and stderr outputs.
+                    # Reading the output is blocking, and therefore stderr is piped to stdout
+                    # to make sure we're always reading from a pipe that has data
+                    # wether it be the progress of the conversion or an error
                     try:
                         p = Popen(cmd, stdout=PIPE, stderr=STDOUT)
 
@@ -314,11 +323,6 @@ def convert_to_av1():
                                     break
 
                         ffmpeg_progress_bar.close()
-                    
-                    except CalledProcessError as e:
-                        ffmpeg_progress_bar.close()
-                        log_exception('Process error occured')
-                        exit()
                     
                     except FileNotFoundError as e:
                         ffmpeg_progress_bar.close()
