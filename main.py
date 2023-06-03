@@ -9,7 +9,6 @@ from json import loads
 from pathlib import Path
 from subprocess import CalledProcessError, run, Popen, PIPE, STDOUT
 
-import re
 import httplib2
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
