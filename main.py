@@ -31,43 +31,46 @@ logging.basicConfig(
 # This will make it easier to see which script the log appeared from
 logger = logging.getLogger('main.py')
 
-# List of extensions/containers from which the script will convert to AV1 MP4
-whitelisted_extensions = ['.mkv', '.mp4']
+class Values:
+    # List of extensions/containers from which the script will convert to AV1 MP4
+    whitelisted_extensions = ['.mkv', '.mp4']
 
-# Folder the converted files will be stored in, relative to the folder they came from
-output_folder = 'AV1'
+    # Folder the converted files will be stored in, relative to the folder they came from
+    output_folder = 'AV1'
 
-# Tell httplib that we're applying retry logic ourselves
-httplib2.RETRIES = 1
+    # Tell httplib not to handle retrying after errors, as we handle it ourselves
+    httplib2.RETRIES = 1
 
-# Upload retry attempts before quitting
-MAX_RETRIES = 10
+    # Upload retry attempts before quitting
+    MAX_RETRIES = 10
 
-# Exceptions that still allow us to retry
-RETRIABLE_EXCEPTIONS = (httplib2.HttpLib2Error, IOError)
+    # Exceptions that still allow us to retry
+    RETRIABLE_EXCEPTIONS = (httplib2.HttpLib2Error, IOError)
 
-# Status codes that still allow us to retry
-RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
+    # Status codes that still allow us to retry
+    RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
 
-# Name of the oauth file containing the oauth data for the project
-CLIENT_SECRETS_FILE = 'client_oauth.json'
+    # Name of the oauth file containing the oauth data for the project
+    CLIENT_SECRETS_FILE = 'client_oauth.json'
 
-# Scopes we'll be using in the API
-YOUTUBE_SCOPES = ['https://www.googleapis.com/auth/youtube.readonly',
-                    'https://www.googleapis.com/auth/youtube.upload']
+    # Scopes we'll be using in the API
+    YOUTUBE_SCOPES = ['https://www.googleapis.com/auth/youtube.readonly',
+                        'https://www.googleapis.com/auth/youtube.upload']
 
-# Name of the service we're using
-YOUTUBE_API_SERVICE_NAME = "youtube"
+    # Name of the service we're using
+    YOUTUBE_API_SERVICE_NAME = "youtube"
 
-# Version of the service we're using
-YOUTUBE_API_VERSION = "v3"
+    # Version of the service we're using
+    YOUTUBE_API_VERSION = "v3"
+
+    youtube = None
 
 # Returns an object that can be used to interact with the API
-def get_authenticated_service():
+def get_authenticated_service(values: Values):
     try:
         # Create a flow object from the oauth file and scopes
-        flow = flow_from_clientsecrets(CLIENT_SECRETS_FILE,
-            scope=YOUTUBE_SCOPES)
+        flow = flow_from_clientsecrets(values.CLIENT_SECRETS_FILE,
+            scope=values.YOUTUBE_SCOPES)
 
         # Create a storage object from a previously saved oauth token
         # and get the credentials. If it doesn't exist, credentials will be None
@@ -81,7 +84,7 @@ def get_authenticated_service():
             credentials = run_flow(flow, storage)
 
         # Build and return the object used to interact with the YouTube API
-        return build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, http=credentials.authorize(httplib2.Http()))
+        return build(values.YOUTUBE_API_SERVICE_NAME, values.YOUTUBE_API_VERSION, http=credentials.authorize(httplib2.Http()))
     
     # If the oauth file does not exist or is incorrectly formatted/corrupted
     # and log it
@@ -98,7 +101,20 @@ def get_authenticated_service():
 
 # Function for uploading the video.
 # This should be multithreaded with the converter
-def upload_video(file: str):
+def upload_video(file: str, values: Values):
+
+    log_info('Authenticating for upload')
+    
+    # We're authenticating again here because the
+    # youtube._http.connections object is an SSLSocket
+    # and cannot be serialized/copied to the new thread.
+    # If this is not done, or the youtube object is not global
+    # the youtube object will lose the entire SSLSocket connection object
+    # and fail with something like:
+    # 'HttpError 401 when requesting None returned
+    # "Request is missing required authentication credentials...'
+    youtube = get_authenticated_service(values)
+
     log_info('Creating body for uploading')
 
     filename = str(file).replace(' ytupload', '')
@@ -121,9 +137,9 @@ def upload_video(file: str):
         media_body=MediaFileUpload(file, chunksize=1024 * 1024, resumable=True)
     )
 
-    resumable_upload(file, insert_request)
+    resumable_upload(file, insert_request, values)
 
-def resumable_upload(filename, insert_request):
+def resumable_upload(filename, insert_request, values: Values):
     response = None
     error = None
     retry = 0
@@ -159,19 +175,19 @@ def resumable_upload(filename, insert_request):
                     exit("The upload failed with an unexpected response: %s" % response)
         
         except HttpError as e:
-            if e.resp.status in RETRIABLE_STATUS_CODES:
+            if e.resp.status in values.RETRIABLE_STATUS_CODES:
                 error = "A retriable HTTP error %d occurred:\n%s" % (e.resp.status,
                                                                     e.content)
             else:
                 progress_bar.close()
                 raise
-        except RETRIABLE_EXCEPTIONS as e:
+        except values.RETRIABLE_EXCEPTIONS as e:
             error = f"A retriable error occurred: {e}"
 
         if error is not None:
             print(error)
             retry += 1
-            if retry > MAX_RETRIES:
+            if retry > values.MAX_RETRIES:
                 progress_bar.close()
                 exit("No longer attempting to retry.")
 
@@ -186,7 +202,7 @@ def video_exists_on_channel(filename: str) -> bool:
 
     filename = str(filename).replace(' ytupload', '')
 
-    response = youtube.search().list(
+    response = values.youtube.search().list(
         part='snippet',
         forMine=True,
         maxResults=1,
@@ -200,8 +216,8 @@ def video_exists_on_channel(filename: str) -> bool:
 
 
 # Function for converting clip to AV1
-def convert_to_av1():
-    for root, dirs, files in os.walk(r'E:\Recordings'):
+def convert_to_av1(values: Values):
+    for root, dirs, files in os.walk(r'C:\Users\nichel\Downloads\Recordings'):
         for dirname in dirs:
             # If the folder is the "lossless" folder where I keep my edited clips
             if dirname == 'lossless':
@@ -215,7 +231,7 @@ def convert_to_av1():
                     
                     # I exlusively work with the mp4 and mkv containers.
                     # If the file does not have either, assume it should be ignored
-                    if Path(filename).suffix.casefold() not in whitelisted_extensions:
+                    if Path(filename).suffix.casefold() not in values.whitelisted_extensions:
                         log_info(f'Skipping {filename} with reason: Not in an mp4 or mkv container')
                         continue
                     
@@ -223,8 +239,8 @@ def convert_to_av1():
                     # containing the path for the converted folder
                     # and a variable containing the path as well as filename
                     # for the new converted file
-                    dirname_converted = Path(root, output_folder)
-                    full_file_path_converted = Path(root, output_folder, f"{os.path.splitext(filename)[0]}.mp4")
+                    dirname_converted = Path(root, values.output_folder)
+                    full_file_path_converted = Path(root, values.output_folder, f"{os.path.splitext(filename)[0]}.mp4")
                     full_file_path = Path(root, dirname, filename)
 
                     # Check if the folder for converted clips does not exist
@@ -237,8 +253,8 @@ def convert_to_av1():
                         except OSError as e:
                             log_exception(e)
                             continue
-                    
-                    p = multiprocessing.Process(target=upload_video, args=(full_file_path,))
+
+                    mp = multiprocessing.Process(target=upload_video, args=(full_file_path, values))
 
                     # the phrase "ytupload" in the filename will be used
                     # to tell the script it should upload the video.
@@ -251,7 +267,7 @@ def convert_to_av1():
                         
                         else:
                             log_info('No matching title found on channel. Uploading...')
-                            p.start()
+                            mp.start()
                             
 
 
@@ -336,7 +352,7 @@ def convert_to_av1():
                         log_info(f'Removed converted {filename} with reason: Keyboard interrupt')
                         exit()
 
-                    p.join()
+                    mp.join()
 
             # Log folders ignored by the script
             else:
@@ -383,11 +399,13 @@ def log_warning(message: str):
 def log_exception(e: Exception):
     logger.exception('Exception occurred')
 
-youtube = get_authenticated_service()
 
 if __name__ == '__main__':
     log_info('#Starting script#')
 
+    values = Values()
+
+    values.youtube = get_authenticated_service(values)
     # Later versions do not seem to play nice with the Google API modules
     # resulting in uploads failing with an error resembling
     # "Redirected but the response is missing a Location: header"
@@ -397,4 +415,4 @@ if __name__ == '__main__':
     if httplib2.__version__ != '0.15.0':
         log_warning(f'httplib2 version 0.15.0 is specifically required, but {httplib2.__version__} is installed')
 
-    convert_to_av1()
+    convert_to_av1(values)
