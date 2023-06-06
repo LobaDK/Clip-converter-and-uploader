@@ -117,8 +117,13 @@ def upload_video(file: str, values: Values):
 
     log_info('Creating body for uploading')
 
+    # Remore the upload flag from the filename
+    # that'll be used as the video title
     filename = str(file).replace(' ytupload', '')
 
+    # Create a body dictionary containing the
+    # video title, description and category
+    # as well as the privacy status
     body=dict(
         snippet=dict(
             title=Path(filename).stem,
@@ -130,6 +135,9 @@ def upload_video(file: str, values: Values):
         )
     )
 
+    # Create an insert_request object used
+    # to upload the video, with the body dictonary as the body
+    # and a chunksize of 1 Mebibyte that is resumeable
     log_info('Creating insert request')
     insert_request = youtube.videos().insert(
         part=','.join(body.keys()),
