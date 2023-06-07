@@ -216,7 +216,7 @@ def resumable_upload(filename, insert_request, values: Values):
     logger.info(f'Uploading {Path(filename).stem}')
     
     # response will be None until upload is complete
-    while response is not None:
+    while response is None:
         try:
             status, response = insert_request.next_chunk()
             if status:
