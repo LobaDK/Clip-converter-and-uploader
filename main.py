@@ -8,6 +8,7 @@ import multiprocessing
 from json import loads
 from pathlib import Path
 from subprocess import CalledProcessError, run, Popen, PIPE, STDOUT
+from logging.handlers import QueueHandler
 
 import httplib2
 from googleapiclient.discovery import build
@@ -18,18 +19,6 @@ from oauth2client.clientsecrets import InvalidClientSecretsError
 from oauth2client.file import Storage
 from oauth2client.tools import run_flow
 from tqdm import tqdm
-
-logging.basicConfig(
-    format='%(asctime)s %(name)s %(levelname)s %(message)s',
-    datefmt='%d-%b-%y %H:%M:%S',
-    filename='clip converter and uploader.log',
-    filemode='a',
-    level=logging.DEBUG
-)
-
-# Set the name of the program the logs will appear under
-# This will make it easier to see which script the log appeared from
-logger = logging.getLogger('main.py')
 
 class Values:
     # List of extensions/containers from which the script will convert to AV1 MP4
@@ -63,10 +52,68 @@ class Values:
     # Version of the service we're using
     YOUTUBE_API_VERSION = "v3"
 
+    # Add empty youtube variable for storing the youtube API object
     youtube = None
+
+    # Add empty queue variable for storing the Queue object
+    queue = None
+
+
+# Logger function and thread
+def logger_process(queue: multiprocessing.Queue):
+    # Create logger
+    logger = logging.getLogger()
+    
+    # Create format formatted as
+    # <date> <logger name> <log level> <log message>
+    # and the date format as
+    # <numerical day>-<numerical month>-<last 2 digits of year> hh:mm:ss
+    log_format = logging.Formatter(fmt='%(asctime)s %(name)s %(levelname)s %(message)s',
+                                   datefmt='%d-%b-%y %H:%M:%S')
+    
+    # Create logging handler that uses a file on disk as the log location
+    # and overwrites on new instances
+    logger_handle = logging.FileHandler(
+            filename='clip converter and uploader.log',
+            mode='w')
+
+    # Apply the format in the handler
+    logger_handle.setFormatter(log_format)
+    # Add the handler to the logger
+    logger.addHandler(logger_handle)
+    # Set minimum required log level severity
+    logger.setLevel(logging.DEBUG)
+
+    # Listen indefinitely for new logs
+    while True:
+        try:
+            # Wait and block until new log is added to the queue
+            log = queue.get()
+            
+            # We use None to signal end of execution
+            if log is None:
+                break
+            
+            # Call and use the previously created logger handler
+            logger.handle(log)
+        
+        # If we use CTLR+C to quit the script early
+        # we wanna make sure the queue is emptied
+        # and the thread can close to help prevent deadlocks
+        except KeyboardInterrupt:
+            while not queue.empty:
+                queue.get(block=False)
+            
+            break
 
 # Returns an object that can be used to interact with the API
 def get_authenticated_service(values: Values):
+    # Create the logger, add the queue handler
+    # and set the minimum log severity
+    logger = logging.getLogger('authenticator')
+    logger.addHandler(QueueHandler(values.queue))
+    logger.setLevel(logging.DEBUG)
+
     try:
         # Create a flow object from the oauth file and scopes
         flow = flow_from_clientsecrets(values.CLIENT_SECRETS_FILE,
@@ -80,7 +127,7 @@ def get_authenticated_service(values: Values):
         # If the credentials didn't already exist or are incorrect
         # get new credentials and save the token to disk
         if credentials is None or credentials.invalid:
-            log_info('No valid credentials found. Running local webserver to authenticate with user')
+            logger.info('No valid credentials found. Running local webserver to authenticate with user')
             credentials = run_flow(flow, storage)
 
         # Build and return the object used to interact with the YouTube API
@@ -90,20 +137,25 @@ def get_authenticated_service(values: Values):
     # and log it
     except InvalidClientSecretsError as e:
         print('"client_oath.json" could not be found or had errors')
-        log_exception(e)
+        logger.exception(e)
         exit()
     
     # Catch any other error and log it as well
     except Exception as e:
         print('Unknown error. Check logs for details')
-        log_exception(e)
+        logger.exception(e)
         exit()
 
 # Function for uploading the video.
 # This should be multithreaded with the converter
 def upload_video(file: str, values: Values):
+    # Create the logger, add the queue handler
+    # and set the minimum log severity
+    logger = logging.getLogger('uploader')
+    logger.addHandler(QueueHandler(values.queue))
+    logger.setLevel(logging.DEBUG)
 
-    log_info('Authenticating for upload')
+    logger.info('Authenticating for upload')
     
     # We're authenticating again here because the
     # youtube._http.connections object is an SSLSocket
@@ -115,7 +167,7 @@ def upload_video(file: str, values: Values):
     # "Request is missing required authentication credentials...'
     youtube = get_authenticated_service(values)
 
-    log_info('Creating body for uploading')
+    logger.info('Creating body for uploading')
 
     # Remore the upload flag from the filename
     # that'll be used as the video title
@@ -138,7 +190,7 @@ def upload_video(file: str, values: Values):
     # Create an insert_request object used
     # to upload the video, with the body dictonary as the body
     # and a chunksize of 1 Mebibyte that is resumeable
-    log_info('Creating insert request')
+    logger.info('Creating insert request')
     insert_request = youtube.videos().insert(
         part=','.join(body.keys()),
         body=body,
@@ -148,6 +200,12 @@ def upload_video(file: str, values: Values):
     resumable_upload(file, insert_request, values)
 
 def resumable_upload(filename, insert_request, values: Values):
+    # Create the logger, add the queue handler
+    # and set the minimum log severity
+    logger = logging.getLogger('resumeable_uploader')
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(QueueHandler(values.queue))
+    
     response = None
     error = None
     retry = 0
@@ -155,10 +213,10 @@ def resumable_upload(filename, insert_request, values: Values):
     # Get the size of the file in bytes, and use it as the "goal" in tqdm
     file_size = os.path.getsize(filename)
     progress_bar = tqdm(total=file_size, unit='bytes', unit_scale=True, desc='Uploading', position=0)
-    log_info(f'Uploading {Path(filename).stem}')
+    logger.info(f'Uploading {Path(filename).stem}')
     
     # response will be None until upload is complete
-    while response is None:
+    while response is not None:
         try:
             status, response = insert_request.next_chunk()
             if status:
@@ -225,13 +283,19 @@ def video_exists_on_channel(filename: str) -> bool:
 
 # Function for converting clip to AV1
 def convert_to_av1(values: Values):
+    # Create the logger, add the queue handler
+    # and set the minimum log severity
+    logger = logging.getLogger('converter')
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(QueueHandler(values.queue))
+
     for root, dirs, files in os.walk(r'C:\Users\nichel\Downloads\Recordings'):
         for dirname in dirs:
             # If the folder is the "lossless" folder where I keep my edited clips
             if dirname == 'lossless':
                 
                 # Log "lossless" folder location
-                log_info(f'Found {Path(root, dirname)}!')
+                logger.info(f'Found {Path(root, dirname)}!')
 
                 # Get list of files and iterate over them.
                 # If folder is empty, an empty list will be returned, and thus not run
@@ -240,7 +304,7 @@ def convert_to_av1(values: Values):
                     # I exlusively work with the mp4 and mkv containers.
                     # If the file does not have either, assume it should be ignored
                     if Path(filename).suffix.casefold() not in values.whitelisted_extensions:
-                        log_info(f'Skipping {filename} with reason: Not in an mp4 or mkv container')
+                        logger.info(f'Skipping {filename} with reason: Not in an mp4 or mkv container')
                         continue
                     
                     # Use the root folder variable to create a variable
@@ -257,9 +321,9 @@ def convert_to_av1(values: Values):
                     if not os.path.exists(dirname_converted):
                         try:
                             os.mkdir(dirname_converted)
-                            log_info(f'Created {dirname_converted}.')
+                            logger.info(f'Created {dirname_converted}.')
                         except OSError as e:
-                            log_exception(e)
+                            logger.exception(e)
                             continue
 
                     mp = multiprocessing.Process(target=upload_video, args=(full_file_path, values))
@@ -268,13 +332,13 @@ def convert_to_av1(values: Values):
                     # to tell the script it should upload the video.
                     # If it is not in the filename, then it should not be uploaded
                     if 'ytupload' in filename.casefold():
-                        log_info('Video is marked for upload. Checking if video has been uploaded...')
+                        logger.info('Video is marked for upload. Checking if video has been uploaded...')
                         
                         if video_exists_on_channel(filename):
-                            log_info(f'{filename} has aleady been uploaded')
+                            logger.info(f'{filename} has aleady been uploaded')
                         
                         else:
-                            log_info('No matching title found on channel. Uploading...')
+                            logger.info('No matching title found on channel. Uploading...')
                             mp.start()
                             
 
@@ -285,17 +349,17 @@ def convert_to_av1(values: Values):
                     # delete, log and convert it.
                     # Otherwise, assume it has aleady been converted and log it
                     if os.path.exists(full_file_path_converted):
-                        if get_video_length(full_file_path) != get_video_length(full_file_path_converted):
+                        if get_video_length(full_file_path, values) != get_video_length(full_file_path_converted, values):
                             os.remove(full_file_path_converted)
-                            log_info(f'Removed converted {filename} with reason: Framecount mismatch')
+                            logger.info(f'Removed converted {filename} with reason: Framecount mismatch')
                         
                         else:
-                            log_info(f'Skipping {filename} with reason: Already exists')
+                            logger.info(f'Skipping {filename} with reason: Already exists')
                             continue
                     
 
                     # Log the file we're about to convert
-                    log_info(f'Converting {filename}.')
+                    logger.info(f'Converting {filename}.')
                     
                     # Create a list with ffmpeg and it's paramters, for a high-quality medium-slow AV1 encoding
                     # a CRF of 45 may seem too high, but it's the perfect mix between
@@ -305,7 +369,7 @@ def convert_to_av1(values: Values):
                         '-crf', '45', '-b:v', '0', '-c:a', 'aac', '-b:a', '192k',
                         '-movflags', '+faststart', str(full_file_path_converted)]
 
-                    frames = get_video_length(full_file_path)
+                    frames = get_video_length(full_file_path, values)
 
                     ffmpeg_progress_bar = tqdm(total=frames, unit='frames', desc='Converting', position=2)
 
@@ -349,7 +413,7 @@ def convert_to_av1(values: Values):
                     
                     except FileNotFoundError as e:
                         ffmpeg_progress_bar.close()
-                        log_exception('Failed to find ffmpeg executable')
+                        logger.exception('Failed to find ffmpeg executable')
                         print('No ffmpeg exectuable was found.')
                         exit()
                     
@@ -357,17 +421,23 @@ def convert_to_av1(values: Values):
                         ffmpeg_progress_bar.close()
                         print('Keyboard interrupt received. Quitting...')
                         os.remove(full_file_path_converted)
-                        log_info(f'Removed converted {filename} with reason: Keyboard interrupt')
+                        logger.info(f'Removed converted {filename} with reason: Keyboard interrupt')
                         exit()
 
                     mp.join()
 
             # Log folders ignored by the script
             else:
-                log_info(f'Ignoring folder {Path(root, dirname)}.')
+                logger.info(f'Ignoring folder {Path(root, dirname)}.')
 
 # Function for getting the length of the original and converted video, in frames
-def get_video_length(filename: str) -> int:
+def get_video_length(filename: str, values: Values) -> int:
+    # Create the logger, add the queue handler
+    # and set the minimum log severity
+    logger = logging.getLogger('video_length')
+    logger.addHandler(QueueHandler(values.queue))
+    logger.setLevel(logging.DEBUG)
+
     cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
            '-show_entries', 'stream=nb_frames', '-of', 'json', str(filename)]
 
@@ -375,15 +445,15 @@ def get_video_length(filename: str) -> int:
         p = run(cmd, check=True, capture_output=True)
     
     except CalledProcessError as e:
-        log_exception(e)
+        logger.exception(e)
         print('Error getting video durations. Check logs for details')
         if 'Invalid data found when processing input' in e.stderr.decode():
             os.remove(filename)
-            log_info(f'Removed converted {filename} with reason: Corruption or unfinished encoding')
+            logger.info(f'Removed converted {filename} with reason: Corruption or unfinished encoding')
         exit()
     
     except FileNotFoundError as e:
-        log_exception('Failed to find ffprobe executable')
+        logger.exception('Failed to find ffprobe executable')
         print('No ffprobe exectuable was found.')
         exit()
 
@@ -392,28 +462,38 @@ def get_video_length(filename: str) -> int:
         return frames
     
     except KeyError as e:
-        log_exception(e)
+        logger.exception(e)
         print('Could not find any frames metadata in the video')
         exit()
 
 
-# Logging functions
-def log_info(message: str):
-    logger.info(message)
-
-def log_warning(message: str):
-    logger.warning(message)
-
-def log_exception(e: Exception):
-    logger.exception('Exception occurred')
-
-
 if __name__ == '__main__':
-    log_info('#Starting script#')
-
+    # Instance an object of our values class for easier passing and workflow
     values = Values()
 
+    # Create and add a multiprocessing queue to our values object
+    values.queue = multiprocessing.Queue()
+
+    # Set the name of the program the logs will appear under
+    # This will make it easier to see which script the log appeared from
+    logger = logging.getLogger('main')
+
+    # Add queue handler using our queue inside the object
+    # and set the minimum log severity
+    logger.addHandler(QueueHandler(values.queue))
+    logger.setLevel(logging.DEBUG)
+
+    # create and start logger thread
+    logger_p = multiprocessing.Process(target=logger_process, args=(values.queue,))
+    logger_p.start()
+
+    logger.info('#Starting script#')
+    logger.info(f'Started logging on {logger_p.name}')
+
+    # Create and add youtube API interaction object
+    # to our values object
     values.youtube = get_authenticated_service(values)
+    
     # Later versions do not seem to play nice with the Google API modules
     # resulting in uploads failing with an error resembling
     # "Redirected but the response is missing a Location: header"
@@ -421,6 +501,9 @@ if __name__ == '__main__':
     # External sources say 0.15.0 and down work, but as I haven't tested this
     # we will assume only 0.15.0 works, but still allow the script to run
     if httplib2.__version__ != '0.15.0':
-        log_warning(f'httplib2 version 0.15.0 is specifically required, but {httplib2.__version__} is installed')
+        logger.warning(f'httplib2 version 0.15.0 is specifically required, but {httplib2.__version__} is installed')
 
     convert_to_av1(values)
+    # Add None to our queue to let the logger thread know
+    # we're done executing, and should quit
+    values.queue.put(None)
