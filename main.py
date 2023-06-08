@@ -9,6 +9,7 @@ from json import loads
 from pathlib import Path
 from subprocess import CalledProcessError, run, Popen, PIPE, STDOUT
 from logging.handlers import QueueHandler
+from queue import Empty
 
 import httplib2
 from googleapiclient.discovery import build
@@ -101,8 +102,11 @@ def logger_process(queue: multiprocessing.Queue):
         # we wanna make sure the queue is emptied
         # and the thread can close to help prevent deadlocks
         except KeyboardInterrupt:
-            while not queue.empty:
-                queue.get(block=False)
+            try:
+                while True:
+                    _ = queue.get(block=False)
+            except Empty:
+                queue.close()
             
             break
 
