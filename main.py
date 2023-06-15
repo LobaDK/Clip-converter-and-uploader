@@ -279,6 +279,10 @@ def resumable_upload(filename, insert_request, values: Values):
 # Function for searching own channel for the video
 def video_exists_on_channel(filename: str) -> bool:
 
+    # Remove the upload flag from the filename.
+    # As searches return partial matches
+    # doing this will make sure both new and old
+    # videos are found
     filename = str(filename).replace(' ytupload', '')
 
     response = values.youtube.search().list(
@@ -339,7 +343,7 @@ def convert_to_av1(values: Values):
                             logger.exception(e)
                             continue
 
-                    mp = threading.Thread(target=upload_video, args=(full_file_path, values))
+                    upload_thread = threading.Thread(target=upload_video, args=(full_file_path, values))
 
                     # the phrase "ytupload" in the filename will be used
                     # to tell the script it should upload the video.
@@ -352,7 +356,7 @@ def convert_to_av1(values: Values):
 
                         else:
                             logger.info('No matching title found on channel. Uploading...')
-                            mp.start()
+                            upload_thread.start()
 
                     # Check if a file with the same name already exists
                     # in the converted folder.
@@ -436,7 +440,7 @@ def convert_to_av1(values: Values):
                         logger.info(f'Removed converted {filename} with reason: Keyboard interrupt')
                         exit()
 
-                    mp.join()
+                    upload_thread.join()
 
             # Log folders ignored by the script
             else:
@@ -471,6 +475,10 @@ def get_video_length(filename: str, values: Values) -> int:
         exit()
 
     try:
+        # ffprobe outputs the file metadata in json format
+        # which lets us easily get the frame count by parsing the json.
+        # The json string consists of a list of streams, where we select
+        # the first stream(video) and get the frame count from it.
         frames = int(loads(p.stdout)['streams'][0]['nb_frames'])
         return frames
 
@@ -490,8 +498,9 @@ if __name__ == '__main__':
     # Create and add a threading lock to our values object
     values.thread_lock = threading.Lock()
 
-    # Set the name of the program the logs will appear under
-    # This will make it easier to see which script the log appeared from
+    # Set the name of the program the logs will appear under.
+    # This will make it easier to see which section of the
+    # script the log appeared from
     logger = logging.getLogger('main')
 
     # Add queue handler using our queue inside the object
@@ -504,7 +513,7 @@ if __name__ == '__main__':
     logger_p.start()
 
     logger.info('#Starting script#')
-    logger.info(f'Started logging on {logger_p.name}')
+    logger.info(f'Started logging on {logger_p.native_id}')
 
     # Create and add youtube API interaction object
     # to our values object
