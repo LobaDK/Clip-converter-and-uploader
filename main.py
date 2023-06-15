@@ -21,6 +21,7 @@ from oauth2client.file import Storage
 from oauth2client.tools import run_flow
 from tqdm import tqdm
 
+
 class Values:
     # List of extensions/containers from which the script will convert to AV1 MP4
     whitelisted_extensions = ['.mkv', '.mp4']
@@ -45,7 +46,7 @@ class Values:
 
     # Scopes we'll be using in the API
     YOUTUBE_SCOPES = ['https://www.googleapis.com/auth/youtube.readonly',
-                        'https://www.googleapis.com/auth/youtube.upload']
+                      'https://www.googleapis.com/auth/youtube.upload']
 
     # Name of the service we're using
     YOUTUBE_API_SERVICE_NAME = "youtube"
@@ -64,14 +65,14 @@ class Values:
 def logger_process(queue: multiprocessing.Queue):
     # Create logger
     logger = logging.getLogger()
-    
+
     # Create format formatted as
     # <date> <logger name> <log level> <log message>
     # and the date format as
     # <numerical day>-<numerical month>-<last 2 digits of year> hh:mm:ss
     log_format = logging.Formatter(fmt='%(asctime)s %(name)s %(levelname)s %(message)s',
                                    datefmt='%d-%b-%y %H:%M:%S')
-    
+
     # Create logging handler that uses a file on disk as the log location
     # and overwrites on new instances
     logger_handle = logging.FileHandler(
@@ -90,14 +91,14 @@ def logger_process(queue: multiprocessing.Queue):
         try:
             # Wait and block until new log is added to the queue
             log = queue.get()
-            
+
             # We use None to signal end of execution
             if log is None:
                 break
-            
+
             # Call and use the previously created logger handler
             logger.handle(log)
-        
+
         # If we use CTLR+C to quit the script early
         # we wanna make sure the queue is emptied
         # and the thread can close to help prevent deadlocks
@@ -107,8 +108,9 @@ def logger_process(queue: multiprocessing.Queue):
                     _ = queue.get(block=False)
             except Empty:
                 queue.close()
-            
+
             break
+
 
 # Returns an object that can be used to interact with the API
 def get_authenticated_service(values: Values):
@@ -121,7 +123,7 @@ def get_authenticated_service(values: Values):
     try:
         # Create a flow object from the oauth file and scopes
         flow = flow_from_clientsecrets(values.CLIENT_SECRETS_FILE,
-            scope=values.YOUTUBE_SCOPES)
+                                       scope=values.YOUTUBE_SCOPES)
 
         # Create a storage object from a previously saved oauth token
         # and get the credentials. If it doesn't exist, credentials will be None
@@ -136,19 +138,20 @@ def get_authenticated_service(values: Values):
 
         # Build and return the object used to interact with the YouTube API
         return build(values.YOUTUBE_API_SERVICE_NAME, values.YOUTUBE_API_VERSION, http=credentials.authorize(httplib2.Http()))
-    
+
     # If the oauth file does not exist or is incorrectly formatted/corrupted
     # and log it
     except InvalidClientSecretsError as e:
         print('"client_oath.json" could not be found or had errors')
         logger.exception(e)
         exit()
-    
+
     # Catch any other error and log it as well
     except Exception as e:
         print('Unknown error. Check logs for details')
         logger.exception(e)
         exit()
+
 
 # Function for uploading the video.
 # This should be multithreaded with the converter
@@ -160,7 +163,7 @@ def upload_video(file: str, values: Values):
     logger.setLevel(logging.DEBUG)
 
     logger.info('Authenticating for upload')
-    
+
     # We're authenticating again here because the
     # youtube._http.connections object is an SSLSocket
     # and cannot be serialized/copied to the new thread.
@@ -180,7 +183,7 @@ def upload_video(file: str, values: Values):
     # Create a body dictionary containing the
     # video title, description and category
     # as well as the privacy status
-    body=dict(
+    body = dict(
         snippet=dict(
             title=Path(filename).stem,
             description='Icon & outro by @Stardust_Buckethead',
@@ -203,13 +206,14 @@ def upload_video(file: str, values: Values):
 
     resumable_upload(file, insert_request, values)
 
+
 def resumable_upload(filename, insert_request, values: Values):
     # Create the logger, add the queue handler
     # and set the minimum log severity
     logger = logging.getLogger('resumeable_uploader')
     logger.setLevel(logging.DEBUG)
     logger.addHandler(QueueHandler(values.queue))
-    
+
     response = None
     error = None
     retry = 0
@@ -218,7 +222,7 @@ def resumable_upload(filename, insert_request, values: Values):
     file_size = os.path.getsize(filename)
     progress_bar = tqdm(total=file_size, unit='bytes', unit_scale=True, desc='Uploading', position=0)
     logger.info(f'Uploading {Path(filename).stem}')
-    
+
     # response will be None until upload is complete
     while response is None:
         try:
@@ -236,18 +240,18 @@ def resumable_upload(filename, insert_request, values: Values):
                 # bit of progress gets handled here, where we instead use
                 # the filesize of the file, to add the remaining progress
                 progress_bar.update(file_size - progress_bar.n)
-                
+
                 progress_bar.close()
-                
+
                 if 'id' in response:
                     print(f"Successfully uploaded {Path(filename).stem}\nWith ID {response['id']}\nAt https://studio.youtube.com/video/{response['id']}/edit")
                 else:
                     exit("The upload failed with an unexpected response: %s" % response)
-        
+
         except HttpError as e:
             if e.resp.status in values.RETRIABLE_STATUS_CODES:
                 error = "A retriable HTTP error %d occurred:\n%s" % (e.resp.status,
-                                                                    e.content)
+                                                                     e.content)
             else:
                 progress_bar.close()
                 raise
@@ -297,20 +301,20 @@ def convert_to_av1(values: Values):
         for dirname in dirs:
             # If the folder is the "lossless" folder where I keep my edited clips
             if dirname == 'lossless':
-                
+
                 # Log "lossless" folder location
                 logger.info(f'Found {Path(root, dirname)}!')
 
                 # Get list of files and iterate over them.
                 # If folder is empty, an empty list will be returned, and thus not run
                 for filename in os.listdir(Path(root, dirname)):
-                    
+
                     # I exlusively work with the mp4 and mkv containers.
                     # If the file does not have either, assume it should be ignored
                     if Path(filename).suffix.casefold() not in values.whitelisted_extensions:
                         logger.info(f'Skipping {filename} with reason: Not in an mp4 or mkv container')
                         continue
-                    
+
                     # Use the root folder variable to create a variable
                     # containing the path for the converted folder
                     # and a variable containing the path as well as filename
@@ -337,15 +341,13 @@ def convert_to_av1(values: Values):
                     # If it is not in the filename, then it should not be uploaded
                     if 'ytupload' in filename.casefold():
                         logger.info('Video is marked for upload. Checking if video has been uploaded...')
-                        
+
                         if video_exists_on_channel(filename):
                             logger.info(f'{filename} has aleady been uploaded')
-                        
+
                         else:
                             logger.info('No matching title found on channel. Uploading...')
                             mp.start()
-                            
-
 
                     # Check if a file with the same name already exists
                     # in the converted folder.
@@ -356,22 +358,21 @@ def convert_to_av1(values: Values):
                         if get_video_length(full_file_path, values) != get_video_length(full_file_path_converted, values):
                             os.remove(full_file_path_converted)
                             logger.info(f'Removed converted {filename} with reason: Framecount mismatch')
-                        
+
                         else:
                             logger.info(f'Skipping {filename} with reason: Already exists')
                             continue
-                    
 
                     # Log the file we're about to convert
                     logger.info(f'Converting {filename}.')
-                    
+
                     # Create a list with ffmpeg and it's paramters, for a high-quality medium-slow AV1 encoding
                     # a CRF of 45 may seem too high, but it's the perfect mix between
                     # low filesize and good-enough quality for online sharing.
                     cmd = ['ffmpeg', '-v', 'fatal', '-n', '-i', str(full_file_path),
-                        '-progress', '-', '-c:v', 'libsvtav1', '-preset', '4',
-                        '-crf', '45', '-b:v', '0', '-c:a', 'aac', '-b:a', '192k',
-                        '-movflags', '+faststart', str(full_file_path_converted)]
+                           '-progress', '-', '-c:v', 'libsvtav1', '-preset', '4',
+                           '-crf', '45', '-b:v', '0', '-c:a', 'aac', '-b:a', '192k',
+                           '-movflags', '+faststart', str(full_file_path_converted)]
 
                     frames = get_video_length(full_file_path, values)
 
@@ -389,38 +390,39 @@ def convert_to_av1(values: Values):
                         while True:
                             # Decode the output to pure text
                             stdout = p.stdout.readline().decode()
-                            
+
                             # Get rid of newlines. It's not actually required
                             # but it bothers me knowing each 2nd line is basically empty
                             # without it
                             stdout = stdout.replace('\n', '')
-                            
+
                             # if the current string in our output is the frames progress
                             if 'frame=' in stdout:
 
-                                    # Add only the new frames by subtracting the total converted with the total progress
-                                    ffmpeg_progress_bar.update(int(stdout.split('=')[1]) - ffmpeg_progress_bar.n)
-                            
+                                # Add only the new frames by subtracting the total converted with the total progress
+                                ffmpeg_progress_bar.update(int(stdout.split('=')[1]) - ffmpeg_progress_bar.n)
+
                             # If the current string in our output instead is the returned progress type.
                             # ffmpeg uses this to display if it's done or not, by being either "continue"
                             # or "end"
                             if 'progress=' in stdout:
 
-                                    # if the progress is end, it means it's done converting, and we can break out of the loop
-                                    if stdout.split('=')[1] == 'end': break
+                                # if the progress is end, it means it's done converting, and we can break out of the loop
+                                if stdout.split('=')[1] == 'end':
+                                    break
 
                             # If the process exited due to the file already existing
                             if 'already exists' in stdout:
-                                    break
+                                break
 
                         ffmpeg_progress_bar.close()
-                    
-                    except FileNotFoundError as e:
+
+                    except FileNotFoundError:
                         ffmpeg_progress_bar.close()
                         logger.exception('Failed to find ffmpeg executable')
                         print('No ffmpeg exectuable was found.')
                         exit()
-                    
+
                     except KeyboardInterrupt:
                         ffmpeg_progress_bar.close()
                         print('Keyboard interrupt received. Quitting...')
@@ -433,6 +435,7 @@ def convert_to_av1(values: Values):
             # Log folders ignored by the script
             else:
                 logger.info(f'Ignoring folder {Path(root, dirname)}.')
+
 
 # Function for getting the length of the original and converted video, in frames
 def get_video_length(filename: str, values: Values) -> int:
@@ -447,7 +450,7 @@ def get_video_length(filename: str, values: Values) -> int:
 
     try:
         p = run(cmd, check=True, capture_output=True)
-    
+
     except CalledProcessError as e:
         logger.exception(e)
         print('Error getting video durations. Check logs for details')
@@ -455,8 +458,8 @@ def get_video_length(filename: str, values: Values) -> int:
             os.remove(filename)
             logger.info(f'Removed converted {filename} with reason: Corruption or unfinished encoding')
         exit()
-    
-    except FileNotFoundError as e:
+
+    except FileNotFoundError:
         logger.exception('Failed to find ffprobe executable')
         print('No ffprobe exectuable was found.')
         exit()
@@ -464,7 +467,7 @@ def get_video_length(filename: str, values: Values) -> int:
     try:
         frames = int(loads(p.stdout)['streams'][0]['nb_frames'])
         return frames
-    
+
     except KeyError as e:
         logger.exception(e)
         print('Could not find any frames metadata in the video')
@@ -497,7 +500,7 @@ if __name__ == '__main__':
     # Create and add youtube API interaction object
     # to our values object
     values.youtube = get_authenticated_service(values)
-    
+
     # Later versions do not seem to play nice with the Google API modules
     # resulting in uploads failing with an error resembling
     # "Redirected but the response is missing a Location: header"
