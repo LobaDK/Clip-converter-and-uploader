@@ -3,13 +3,13 @@ import logging
 import os
 import random
 import sys
+import threading
 import time
-import multiprocessing
 from json import loads
-from pathlib import Path
-from subprocess import CalledProcessError, run, Popen, PIPE, STDOUT
 from logging.handlers import QueueHandler
-from queue import Empty
+from pathlib import Path
+from queue import Empty, Queue
+from subprocess import PIPE, STDOUT, CalledProcessError, Popen, run
 
 import httplib2
 from googleapiclient.discovery import build
@@ -60,9 +60,12 @@ class Values:
     # Add empty queue variable for storing the Queue object
     queue = None
 
+    # Add empty thread lock variable for storing the threading.Lock object
+    thread_lock = None
+
 
 # Logger function and thread
-def logger_process(queue: multiprocessing.Queue):
+def logger_process(queue: Queue):
     # Create logger
     logger = logging.getLogger()
 
@@ -76,8 +79,8 @@ def logger_process(queue: multiprocessing.Queue):
     # Create logging handler that uses a file on disk as the log location
     # and overwrites on new instances
     logger_handle = logging.FileHandler(
-            filename='clip converter and uploader.log',
-            mode='w')
+        filename='clip converter and uploader.log',
+        mode='w')
 
     # Apply the format in the handler
     logger_handle.setFormatter(log_format)
@@ -232,14 +235,16 @@ def resumable_upload(filename, insert_request, values: Values):
                 # status.resumable_progress returns the total uploaded bytes so far.
                 # By subtracting it from the current progress bar's progress, we add only
                 # the newly uploaded chunk.
-                progress_bar.update(status.resumable_progress - progress_bar.n)
+                with values.thread_lock:
+                    progress_bar.update(status.resumable_progress - progress_bar.n)
 
             if response is not None:
 
                 # When upload is complete, no status is returned, so the last
                 # bit of progress gets handled here, where we instead use
                 # the filesize of the file, to add the remaining progress
-                progress_bar.update(file_size - progress_bar.n)
+                with values.thread_lock:
+                    progress_bar.update(file_size - progress_bar.n)
 
                 progress_bar.close()
 
@@ -334,7 +339,7 @@ def convert_to_av1(values: Values):
                             logger.exception(e)
                             continue
 
-                    mp = multiprocessing.Process(target=upload_video, args=(full_file_path, values))
+                    mp = threading.Thread(target=upload_video, args=(full_file_path, values))
 
                     # the phrase "ytupload" in the filename will be used
                     # to tell the script it should upload the video.
@@ -400,7 +405,8 @@ def convert_to_av1(values: Values):
                             if 'frame=' in stdout:
 
                                 # Add only the new frames by subtracting the total converted with the total progress
-                                ffmpeg_progress_bar.update(int(stdout.split('=')[1]) - ffmpeg_progress_bar.n)
+                                with values.thread_lock:
+                                    ffmpeg_progress_bar.update(int(stdout.split('=')[1]) - ffmpeg_progress_bar.n)
 
                             # If the current string in our output instead is the returned progress type.
                             # ffmpeg uses this to display if it's done or not, by being either "continue"
@@ -479,7 +485,10 @@ if __name__ == '__main__':
     values = Values()
 
     # Create and add a multiprocessing queue to our values object
-    values.queue = multiprocessing.Queue()
+    values.queue = Queue()
+
+    # Create and add a threading lock to our values object
+    values.thread_lock = threading.Lock()
 
     # Set the name of the program the logs will appear under
     # This will make it easier to see which script the log appeared from
@@ -491,7 +500,7 @@ if __name__ == '__main__':
     logger.setLevel(logging.DEBUG)
 
     # create and start logger thread
-    logger_p = multiprocessing.Process(target=logger_process, args=(values.queue,))
+    logger_p = threading.Thread(target=logger_process, args=(values.queue,))
     logger_p.start()
 
     logger.info('#Starting script#')
