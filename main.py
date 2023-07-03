@@ -440,7 +440,8 @@ def convert_to_av1(values: Values):
                         logger.info(f'Removed converted {filename} with reason: Keyboard interrupt')
                         exit()
 
-                    upload_thread.join()
+                    if upload_thread.is_alive():
+                        upload_thread.join()
 
             # Log folders ignored by the script
             else:
